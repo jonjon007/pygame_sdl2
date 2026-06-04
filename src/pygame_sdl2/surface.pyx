@@ -298,7 +298,10 @@ cdef class Surface:
         cdef SDL_PixelFormat *sample_format
 
         if surface is None:
-            sample_format = SDL_AllocFormat(SDL_PIXELFORMAT_BGRA8888)
+            # Use ARGB8888 which maps directly to D3D12's DXGI_FORMAT_B8G8R8A8_UNORM
+            # on Xbox. BGRA8888 requires format conversion during texture upload which
+            # can corrupt the alpha channel on some D3D12 implementations.
+            sample_format = SDL_AllocFormat(SDL_PIXELFORMAT_ARGB8888)
         else:
             sample_format = (<Surface> surface).surface.format
 

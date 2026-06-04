@@ -2898,6 +2898,26 @@ cdef extern from "SDL.h" nogil:
 
     void *SDL_RenderGetMetalCommandEncoder(SDL_Renderer *renderer)
 
+    int SDL_RenderSetVSync(SDL_Renderer *renderer, int vsync)
+
+    ctypedef enum SDL_ScaleMode:
+        SDL_ScaleModeNearest
+        SDL_ScaleModeLinear
+        SDL_ScaleModeBest
+
+    int SDL_SetTextureScaleMode(SDL_Texture *texture, SDL_ScaleMode scaleMode)
+    int SDL_GetTextureScaleMode(SDL_Texture *texture, SDL_ScaleMode *scaleMode)
+
+    ctypedef struct SDL_Vertex:
+        SDL_FPoint position
+        SDL_Color color
+        SDL_FPoint tex_coord
+
+    int SDL_RenderGeometry(SDL_Renderer *renderer, SDL_Texture *texture, const SDL_Vertex *vertices, int num_vertices, const int *indices, int num_indices)
+    int SDL_RenderGeometryRaw(SDL_Renderer *renderer, SDL_Texture *texture, const float *xy, int xy_stride, const SDL_Color *color, int color_stride, const float *uv, int uv_stride, int num_vertices, const void *indices, int num_indices, int size_indices)
+
+    SDL_BlendMode SDL_ComposeCustomBlendMode_new "SDL_ComposeCustomBlendMode"(SDL_BlendFactor srcColorFactor, SDL_BlendFactor dstColorFactor, SDL_BlendOperation colorOperation, SDL_BlendFactor srcAlphaFactor, SDL_BlendFactor dstAlphaFactor, SDL_BlendOperation alphaOperation)
+
     ctypedef struct SDL_Sensor
 
     ctypedef Sint32 SDL_SensorID

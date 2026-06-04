@@ -19,6 +19,7 @@
 from sdl2 cimport *
 from sdl2_image cimport *
 from libc.string cimport memcpy, memset
+from libc.stdlib cimport malloc, free
 from pygame_sdl2.display cimport *
 from pygame_sdl2.surface cimport *
 from pygame_sdl2.rwobject cimport to_rwops
@@ -34,6 +35,14 @@ BLENDMODE_NONE = SDL_BLENDMODE_NONE
 BLENDMODE_BLEND = SDL_BLENDMODE_BLEND
 BLENDMODE_ADD = SDL_BLENDMODE_ADD
 BLENDMODE_MOD = SDL_BLENDMODE_MOD
+
+SCALEMODE_NEAREST = SDL_ScaleModeNearest
+SCALEMODE_LINEAR = SDL_ScaleModeLinear
+SCALEMODE_BEST = SDL_ScaleModeBest
+
+TEXTUREACCESS_STATIC = SDL_TEXTUREACCESS_STATIC
+TEXTUREACCESS_STREAMING = SDL_TEXTUREACCESS_STREAMING
+TEXTUREACCESS_TARGET = SDL_TEXTUREACCESS_TARGET
 
 cdef bint DEBUG_DRAW_BBOX = True
 
@@ -167,6 +176,264 @@ cdef class Renderer:
     def create_texture(self, size):
         if SDL_RenderTargetSupported(self.renderer) != SDL_TRUE:
             raise error()
+
+    def create_target_texture(self, int w, int h):
+        """Create an RGBA texture that can be used as a render target."""
+        if SDL_RenderTargetSupported(self.renderer) != SDL_TRUE:
+            raise error("Render targets not supported")
+
+        cdef SDL_Texture *tex = SDL_CreateTexture(
+            self.renderer, SDL_PIXELFORMAT_ARGB8888,
+            SDL_TEXTUREACCESS_TARGET, w, h)
+        if tex == NULL:
+            raise error()
+
+        cdef GPUTexture gt = GPUTexture.__new__(GPUTexture)
+        gt.texture = tex
+        gt.renderer = self.renderer
+        gt.w = w
+        gt.h = h
+        gt.owned = True
+        return gt
+
+    def create_texture_from_surface(self, Surface surf not None):
+        """Upload a pygame Surface to a GPU texture."""
+        # Disable RLE encoding before upload. SDL_ConvertSurface may copy
+        # the RLE flag from the source, causing the pixel buffer to be
+        # RLE-encoded. SDL_UpdateTexture reads raw bytes and doesn't handle
+        # RLE, resulting in corrupted texture data on D3D12.
+        SDL_SetSurfaceRLE(surf.surface, 0)
+
+        cdef SDL_Texture *tex = SDL_CreateTextureFromSurface(
+            self.renderer, surf.surface)
+        if tex == NULL:
+            raise error()
+
+        cdef int w, h
+        cdef Uint32 fmt
+        cdef int access
+        SDL_QueryTexture(tex, &fmt, &access, &w, &h)
+
+        cdef GPUTexture gt = GPUTexture.__new__(GPUTexture)
+        gt.texture = tex
+        gt.renderer = self.renderer
+        gt.w = w
+        gt.h = h
+        gt.owned = True
+        return gt
+
+    def set_render_target(self, GPUTexture target=None):
+        """Set the render target. Pass None to target the default (screen)."""
+        cdef SDL_Texture *tex = NULL
+        if target is not None:
+            tex = target.texture
+        if SDL_SetRenderTarget(self.renderer, tex) != 0:
+            raise error()
+
+    def get_renderer_output_size(self):
+        """Return (w, h) of the renderer output."""
+        cdef int w, h
+        if SDL_GetRendererOutputSize(self.renderer, &w, &h) != 0:
+            raise error()
+        return (w, h)
+
+    def set_logical_size(self, int w, int h):
+        """Set the logical rendering size for resolution independence."""
+        if SDL_RenderSetLogicalSize(self.renderer, w, h) != 0:
+            raise error()
+
+    def get_logical_size(self):
+        """Return the current logical size as (w, h)."""
+        cdef int w, h
+        SDL_RenderGetLogicalSize(self.renderer, &w, &h)
+        return (w, h)
+
+    def set_draw_blend_mode(self, int mode):
+        SDL_SetRenderDrawBlendMode(self.renderer, <SDL_BlendMode>mode)
+
+    def set_clip_rect(self, rect=None):
+        """Set the clip rectangle. Pass None to disable clipping."""
+        cdef SDL_Rect r
+        if rect is None:
+            SDL_RenderSetClipRect(self.renderer, NULL)
+        else:
+            to_sdl_rect(rect, &r)
+            SDL_RenderSetClipRect(self.renderer, &r)
+
+    def render_copy_f(self, GPUTexture tex not None, src_rect=None, dst_rect=None):
+        """Copy a texture to the renderer with float precision dest."""
+        cdef SDL_Rect sr
+        cdef SDL_Rect *srp = NULL
+        cdef SDL_FRect dr
+        cdef SDL_FRect *drp = NULL
+
+        if src_rect is not None:
+            to_sdl_rect(src_rect, &sr)
+            srp = &sr
+        if dst_rect is not None:
+            dr.x = <float>dst_rect[0]
+            dr.y = <float>dst_rect[1]
+            dr.w = <float>dst_rect[2]
+            dr.h = <float>dst_rect[3]
+            drp = &dr
+
+        SDL_RenderCopyF(self.renderer, tex.texture, srp, drp)
+
+    def render_copy_ex_f(self, GPUTexture tex not None, src_rect=None,
+                         dst_rect=None, double angle=0.0, center=None, int flip=0):
+        """Copy a texture with rotation/flip and float precision dest."""
+        cdef SDL_Rect sr
+        cdef SDL_Rect *srp = NULL
+        cdef SDL_FRect dr
+        cdef SDL_FRect *drp = NULL
+        cdef SDL_FPoint cp
+        cdef SDL_FPoint *cpp = NULL
+
+        if src_rect is not None:
+            to_sdl_rect(src_rect, &sr)
+            srp = &sr
+        if dst_rect is not None:
+            dr.x = <float>dst_rect[0]
+            dr.y = <float>dst_rect[1]
+            dr.w = <float>dst_rect[2]
+            dr.h = <float>dst_rect[3]
+            drp = &dr
+        if center is not None:
+            cp.x = <float>center[0]
+            cp.y = <float>center[1]
+            cpp = &cp
+
+        SDL_RenderCopyExF(self.renderer, tex.texture, srp, drp,
+                          angle, cpp, <SDL_RendererFlip>flip)
+
+    def render_geometry(self, GPUTexture tex, vertices, indices=None):
+        """Render textured geometry (triangles).
+
+        vertices: list of (pos_x, pos_y, color_r, color_g, color_b, color_a, tex_u, tex_v)
+        indices: list of int indices, or None
+        """
+        cdef int num_verts = len(vertices)
+        cdef SDL_Vertex *verts = <SDL_Vertex *>malloc(num_verts * sizeof(SDL_Vertex))
+        if verts == NULL:
+            raise MemoryError()
+
+        cdef int i
+        for i in range(num_verts):
+            v = vertices[i]
+            verts[i].position.x = <float>v[0]
+            verts[i].position.y = <float>v[1]
+            verts[i].color.r = <Uint8>v[2]
+            verts[i].color.g = <Uint8>v[3]
+            verts[i].color.b = <Uint8>v[4]
+            verts[i].color.a = <Uint8>v[5]
+            verts[i].tex_coord.x = <float>v[6]
+            verts[i].tex_coord.y = <float>v[7]
+
+        cdef SDL_Texture *sdl_tex = NULL
+        if tex is not None:
+            sdl_tex = tex.texture
+
+        cdef int *idx = NULL
+        cdef int num_idx = 0
+        if indices is not None:
+            num_idx = len(indices)
+            idx = <int *>malloc(num_idx * sizeof(int))
+            if idx == NULL:
+                free(verts)
+                raise MemoryError()
+            for i in range(num_idx):
+                idx[i] = <int>indices[i]
+
+        cdef int result = SDL_RenderGeometry(
+            self.renderer, sdl_tex, verts, num_verts, idx, num_idx)
+
+        free(verts)
+        if idx != NULL:
+            free(idx)
+
+        if result != 0:
+            raise error()
+
+    def render_read_pixels(self, rect=None):
+        """Read pixels from the current render target into a new Surface."""
+        cdef SDL_Rect r
+        cdef SDL_Rect *rp = NULL
+        cdef int w, h
+
+        if rect is not None:
+            to_sdl_rect(rect, &r)
+            rp = &r
+            w = r.w
+            h = r.h
+        else:
+            SDL_GetRendererOutputSize(self.renderer, &w, &h)
+
+        import pygame_sdl2
+        surf = pygame_sdl2.Surface((w, h), 0, 32)
+        cdef Surface pysurf = <Surface>surf
+
+        if SDL_RenderReadPixels(self.renderer, rp,
+                                SDL_PIXELFORMAT_ARGB8888,
+                                pysurf.surface.pixels,
+                                pysurf.surface.pitch) != 0:
+            raise error()
+
+        return surf
+
+    def render_target_supported(self):
+        return SDL_RenderTargetSupported(self.renderer) == SDL_TRUE
+
+
+cdef class GPUTexture:
+    """A GPU texture handle for use with the SDL_Renderer-based renderer."""
+
+    cdef SDL_Texture *texture
+    cdef SDL_Renderer *renderer
+    cdef public int w, h
+    cdef bint owned
+
+    def __cinit__(self):
+        self.texture = NULL
+        self.renderer = NULL
+        self.w = 0
+        self.h = 0
+        self.owned = False
+
+    def __dealloc__(self):
+        if self.owned and self.texture != NULL:
+            SDL_DestroyTexture(self.texture)
+            self.texture = NULL
+
+    def destroy(self):
+        """Explicitly destroy the texture."""
+        if self.texture != NULL:
+            SDL_DestroyTexture(self.texture)
+            self.texture = NULL
+            self.owned = False
+
+    @property
+    def valid(self):
+        return self.texture != NULL
+
+    @property
+    def size(self):
+        return (self.w, self.h)
+
+    def set_alpha_mod(self, int alpha):
+        if self.texture != NULL:
+            SDL_SetTextureAlphaMod(self.texture, <Uint8>alpha)
+
+    def set_color_mod(self, int r, int g, int b):
+        if self.texture != NULL:
+            SDL_SetTextureColorMod(self.texture, <Uint8>r, <Uint8>g, <Uint8>b)
+
+    def set_blend_mode(self, int mode):
+        if self.texture != NULL:
+            SDL_SetTextureBlendMode(self.texture, <SDL_BlendMode>mode)
+
+    def set_scale_mode(self, int mode):
+        if self.texture != NULL:
+            SDL_SetTextureScaleMode(self.texture, <SDL_ScaleMode>mode)
 
 
 cdef class Texture:
